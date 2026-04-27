@@ -4,6 +4,70 @@
 
 The goal is not to replace a full CLI framework, but to organize scattered scripts into a stable, unified, and discoverable command-line toolbox.
 
+## Installation
+
+Clone the repository to wherever you want to keep it:
+
+```bash
+git clone https://github.com/maptile/konbini.git ~/.konbini
+```
+
+Create a wrapper script on your `PATH` so you can call `konbini` from anywhere and bake in your custom commands directory:
+
+```bash
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/konbini << 'EOF'
+#!/usr/bin/env bash
+exec "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
+EOF
+chmod +x ~/.local/bin/konbini
+```
+
+`~/.local/bin` is automatically added to `PATH` by Ubuntu's default `~/.profile` when the directory exists. If it's not on your `PATH` yet, restart your shell or run `source ~/.profile`.
+
+This assumes your custom commands live at `~/projects/my-custom-commands` — adjust the path if yours is elsewhere. The directory does not need to exist yet.
+
+The wrapper script is the recommended approach — it works in interactive terminals, shell scripts, and cron jobs, and tab completion works through it automatically.
+
+<details>
+<summary>Alternative: shell function or alias</summary>
+
+**Shell function** (interactive terminals only) — add to `.bashrc`:
+
+```bash
+konbini() {
+  "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
+}
+```
+
+**Alias** (not recommended) — bash does not trigger custom tab completion for aliases:
+
+```bash
+alias konbini='~/.konbini/konbini --custom-commands-dir ~/projects/my-custom-commands'
+```
+
+Both only work in shells that have sourced `.bashrc`. Cron jobs and non-interactive scripts do not source `.bashrc` by default.
+
+</details>
+
+Optionally enable tab completion. Add one of the following to your shell rc file:
+
+```bash
+# ~/.bashrc
+eval "$(konbini completion bash)"
+```
+
+```zsh
+# ~/.zshrc
+eval "$(konbini completion zsh)"
+```
+
+Then reload your shell:
+
+```bash
+source ~/.bashrc   # or source ~/.zshrc
+```
+
 ## Minimal example
 
 Place a file `hello.sh` in the `commands/` directory:
@@ -38,7 +102,7 @@ That's the core usage: drop scripts into a directory, run them through a single 
 ## What it does
 
 - Reads built-in commands from `commands/`
-- Reads your own commands from `custom-commands/commands/`
+- Reads your own commands from a custom commands directory you specify
 - Supports both `.sh` and `.js` command files
 - Supports subcommand groups via `<command>-commands/` directories
 - Lists all available commands with `-h` / `help`
@@ -159,83 +223,16 @@ konbini doctor
 
 Files and directories whose names start with `_` or `.` are ignored by `konbini`.
 
-## Using a custom commands directory
-
-`konbini` accepts a `--custom-commands-dir` flag to specify where your personal commands live.
-
-Example:
-
-```bash
-./konbini --custom-commands-dir ~/projects/my-custom-commands -h
-```
-
-## Using konbini in Bash
-
-Passing `--custom-commands-dir` every time is tedious. Here are a few ways to wrap it.
-
-### Wrapper script (recommended)
-
-Create an executable script at `~/bin/konbini` (or any directory on your `PATH`):
-
-```bash
-#!/usr/bin/env bash
-exec "$HOME/projects/konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
-```
-
-```bash
-chmod +x ~/bin/konbini
-```
-
-This is the most compatible approach — it works in interactive terminals, shell scripts, and **cron jobs** (as long as `~/bin` is on `PATH`, or you use the full path). Tab completion also works through the wrapper automatically.
-
-### Shell function (interactive terminals only)
-
-Add to `.bashrc`:
-
-```bash
-konbini() {
-  "$HOME/projects/konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
-}
-```
-
-Only works in shells that have sourced `.bashrc`. Cron jobs and scripts with `#!/usr/bin/env bash` do not source `.bashrc` by default.
-
-### Alias (not recommended)
-
-```bash
-alias konbini='~/projects/konbini/konbini --custom-commands-dir ~/projects/my-custom-commands'
-```
-
-Same limitation as shell functions, and bash does not trigger custom tab completion for aliases by default.
-
 ## Tab completion
 
-`konbini` ships a `completion` command that outputs a shell completion script, enabling tab completion for command and subcommand names.
-
-**Bash** — add to `.bashrc`:
-
-```bash
-eval "$(konbini completion bash)"
-```
-
-**Zsh** — add to `.zshrc`:
-
-```zsh
-eval "$(konbini completion zsh)"
-```
-
-Restart your terminal or run `source ~/.bashrc` / `source ~/.zshrc` to apply. Then:
+After setting up the wrapper and adding the `eval` line to your rc file, tab completion works like this:
 
 ```bash
 konbini <Tab>          # complete all available commands
 konbini git <Tab>      # complete subcommands under the git group
 ```
 
-### With a wrapper script
-
-The completion script invokes the command via `${COMP_WORDS[0]}` (the actual entry point you typed), so as long as you use a wrapper script (recommended), completion will automatically go through the wrapper and correctly include commands from your custom directory — no extra configuration needed.
-
-Note: bash does not trigger custom completion functions for aliases. Use a wrapper script or shell function instead.
+The completion script invokes the command via `${COMP_WORDS[0]}` (whatever you typed at the prompt), so it automatically goes through your wrapper and includes commands from your custom directory — no extra configuration needed.
 
 ## doctor
 

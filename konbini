@@ -1,0 +1,791 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILTIN_COMMANDS_DIR="${SCRIPT_DIR}/commands"
+DEFAULT_CUSTOM_COMMANDS_DIR="${SCRIPT_DIR}/custom-commands"
+CUSTOM_COMMANDS_DIR="$DEFAULT_CUSTOM_COMMANDS_DIR"
+VERBOSE=false
+
+shopt -s nullglob
+
+declare -A DESCRIPTIONS
+declare -A COMMAND_PATHS
+declare -A COMMAND_SOURCES
+declare -A SUBCOMMAND_PATHS
+declare -A SUBCOMMAND_SOURCES
+declare -A SUBCOMMAND_DESCRIPTIONS
+declare -A TOP_LEVEL_DUPLICATES
+declare -A SUBCOMMAND_DUPLICATES
+declare -A SUBCOMMAND_GROUPS
+
+declare -a COMMAND_DIRS=()
+CUSTOM_COMMANDS_COMMANDS_DIR=""
+
+set_command_dirs() {
+    COMMAND_DIRS=("$BUILTIN_COMMANDS_DIR")
+    if [ -n "$CUSTOM_COMMANDS_DIR" ]; then
+        CUSTOM_COMMANDS_COMMANDS_DIR="$CUSTOM_COMMANDS_DIR/commands"
+        COMMAND_DIRS+=("$CUSTOM_COMMANDS_COMMANDS_DIR")
+    else
+        CUSTOM_COMMANDS_COMMANDS_DIR=""
+    fi
+}
+
+is_help_flag() {
+    [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ "$1" = "help" ]
+}
+
+get_command_name_from_path() {
+    local cmd_file=$1
+    local file_name="${cmd_file##*/}"
+    local base_name="${file_name%.*}"
+    printf '%s\n' "${base_name%%.*}"
+}
+
+get_file_type_from_path() {
+    case "$1" in
+        *.sh) printf 'sh\n' ;;
+        *.js) printf 'js\n' ;;
+        *) printf '\n' ;;
+    esac
+}
+
+read_description() {
+    local cmd_file=$1
+    local file_type=$2
+
+    if [ "$file_type" = "sh" ]; then
+        grep '^# DESCRIPTION:' "$cmd_file" | head -1 | sed 's/^# DESCRIPTION: *//'
+    else
+        grep '^// DESCRIPTION:' "$cmd_file" | head -1 | sed 's#^// DESCRIPTION: *##'
+    fi
+}
+
+append_duplicate_entry() {
+    local map_name=$1
+    local key=$2
+    local first_path=$3
+    local second_path=$4
+    local -n duplicate_map=$map_name
+    local current="${duplicate_map[$key]}"
+
+    if [ -z "$current" ]; then
+        duplicate_map[$key]="$first_path"$'\n'"$second_path"
+        return
+    fi
+
+    case "$current" in
+        *$'\n'"$second_path"|"$second_path"$'\n'*|"$second_path")
+            ;;
+        *)
+            duplicate_map[$key]="$current"$'\n'"$second_path"
+            ;;
+    esac
+}
+
+pick_override() {
+    local existing_path=$1
+    local candidate_path=$2
+
+    case "$candidate_path" in
+        "$CUSTOM_COMMANDS_DIR"/*)
+            printf '%s\n' "$candidate_path"
+            ;;
+        *)
+            printf '%s\n' "$existing_path"
+            ;;
+    esac
+}
+
+collect_top_level_candidates_in_dir() {
+    local search_dir=$1
+    local command_name=$2
+    local -n out_candidates=$3
+
+    out_candidates=()
+    [ -d "$search_dir" ] || return
+    [[ "$command_name" =~ ^[_\.] ]] && return
+
+    local cmd_file
+    for cmd_file in \
+        "$search_dir/$command_name.sh" \
+        "$search_dir/$command_name.js" \
+        "$search_dir/$command_name".*.sh \
+        "$search_dir/$command_name".*.js; do
+        [ -f "$cmd_file" ] || continue
+        out_candidates+=("$cmd_file")
+    done
+}
+
+collect_subcommand_candidates_in_dir() {
+    local search_dir=$1
+    local parent_command=$2
+    local subcommand_name=$3
+    local -n out_candidates=$4
+
+    out_candidates=()
+    [ -d "$search_dir" ] || return
+    [[ "$parent_command" =~ ^[_\.] ]] && return
+    [[ "$subcommand_name" =~ ^[_\.] ]] && return
+
+    local subcommands_dir="$search_dir/${parent_command}-commands"
+    [ -d "$subcommands_dir" ] || return
+
+    local cmd_file
+    for cmd_file in \
+        "$subcommands_dir/$subcommand_name.sh" \
+        "$subcommands_dir/$subcommand_name.js" \
+        "$subcommands_dir/$subcommand_name".*.sh \
+        "$subcommands_dir/$subcommand_name".*.js; do
+        [ -f "$cmd_file" ] || continue
+        out_candidates+=("$cmd_file")
+    done
+}
+
+group_exists() {
+    local parent_command=$1
+    local dir
+    for dir in "${COMMAND_DIRS[@]}"; do
+        [ -d "$dir/${parent_command}-commands" ] && return 0
+    done
+    return 1
+}
+
+scan_all_definitions() {
+    DESCRIPTIONS=()
+    COMMAND_PATHS=()
+    COMMAND_SOURCES=()
+    SUBCOMMAND_PATHS=()
+    SUBCOMMAND_SOURCES=()
+    SUBCOMMAND_DESCRIPTIONS=()
+    TOP_LEVEL_DUPLICATES=()
+    SUBCOMMAND_DUPLICATES=()
+    SUBCOMMAND_GROUPS=()
+
+    set_command_dirs
+
+    if [ ! -d "$BUILTIN_COMMANDS_DIR" ]; then
+        mkdir -p "$BUILTIN_COMMANDS_DIR"
+        echo "Created commands directory: $BUILTIN_COMMANDS_DIR"
+    fi
+
+    local dir
+    for dir in "${COMMAND_DIRS[@]}"; do
+        [ -d "$dir" ] || continue
+
+        local cmd_file
+        for cmd_file in "$dir"/*.sh "$dir"/*.js; do
+            [ -e "$cmd_file" ] || continue
+
+            local cmd_name
+            cmd_name=$(get_command_name_from_path "$cmd_file")
+            [[ "$cmd_name" =~ ^[_\.] ]] && continue
+
+            local file_type
+            file_type=$(get_file_type_from_path "$cmd_file")
+
+            local description
+            description=$(read_description "$cmd_file" "$file_type")
+            [ -z "$description" ] && description="execute $cmd_name command"
+
+            if [ -n "${COMMAND_PATHS[$cmd_name]}" ] && [ "${COMMAND_PATHS[$cmd_name]}" != "$cmd_file" ]; then
+                if [ "${COMMAND_SOURCES[$cmd_name]}" = "$dir" ]; then
+                    append_duplicate_entry TOP_LEVEL_DUPLICATES "$cmd_name" "${COMMAND_PATHS[$cmd_name]}" "$cmd_file"
+                else
+                    local selected_path
+                    selected_path=$(pick_override "${COMMAND_PATHS[$cmd_name]}" "$cmd_file")
+                    if [ "$selected_path" = "$cmd_file" ]; then
+                        COMMAND_PATHS[$cmd_name]="$cmd_file"
+                        COMMAND_SOURCES[$cmd_name]="$dir"
+                        DESCRIPTIONS[$cmd_name]="$description"
+                    fi
+                fi
+            else
+                COMMAND_PATHS[$cmd_name]="$cmd_file"
+                COMMAND_SOURCES[$cmd_name]="$dir"
+                DESCRIPTIONS[$cmd_name]="$description"
+            fi
+        done
+
+        local subdir
+        for subdir in "$dir"/*-commands; do
+            [ -d "$subdir" ] || continue
+
+            local group_name
+            group_name=$(basename "$subdir")
+            group_name="${group_name%-commands}"
+            [[ "$group_name" =~ ^[_\.] ]] && continue
+            SUBCOMMAND_GROUPS[$group_name]=1
+
+            for cmd_file in "$subdir"/*.sh "$subdir"/*.js; do
+                [ -e "$cmd_file" ] || continue
+
+                local subcommand_name
+                subcommand_name=$(get_command_name_from_path "$cmd_file")
+                [[ "$subcommand_name" =~ ^[_\.] ]] && continue
+
+                local key="$group_name:$subcommand_name"
+                local file_type
+                file_type=$(get_file_type_from_path "$cmd_file")
+
+                local description
+                description=$(read_description "$cmd_file" "$file_type")
+                [ -z "$description" ] && description="execute $subcommand_name subcommand"
+
+                if [ -n "${SUBCOMMAND_PATHS[$key]}" ] && [ "${SUBCOMMAND_PATHS[$key]}" != "$cmd_file" ]; then
+                    if [ "${SUBCOMMAND_SOURCES[$key]}" = "$subdir" ]; then
+                        append_duplicate_entry SUBCOMMAND_DUPLICATES "$key" "${SUBCOMMAND_PATHS[$key]}" "$cmd_file"
+                    else
+                        local selected_path
+                        selected_path=$(pick_override "${SUBCOMMAND_PATHS[$key]}" "$cmd_file")
+                        if [ "$selected_path" = "$cmd_file" ]; then
+                            SUBCOMMAND_PATHS[$key]="$cmd_file"
+                            SUBCOMMAND_SOURCES[$key]="$subdir"
+                            SUBCOMMAND_DESCRIPTIONS[$key]="$description"
+                        fi
+                    fi
+                else
+                    SUBCOMMAND_PATHS[$key]="$cmd_file"
+                    SUBCOMMAND_SOURCES[$key]="$subdir"
+                    SUBCOMMAND_DESCRIPTIONS[$key]="$description"
+                fi
+            done
+        done
+    done
+}
+
+command_source_label() {
+    local source_dir=$1
+    case "$source_dir" in
+        "$BUILTIN_COMMANDS_DIR"|"$BUILTIN_COMMANDS_DIR"/*)
+            printf 'built-in\n'
+            ;;
+        "$CUSTOM_COMMANDS_DIR"|"$CUSTOM_COMMANDS_DIR"/*)
+            printf 'custom\n'
+            ;;
+        *)
+            printf '%s\n' "$source_dir"
+            ;;
+    esac
+}
+
+format_duplicate_key() {
+    local label=$1
+    local key=$2
+
+    if [ "$label" = "subcommand" ]; then
+        printf '%s\n' "${key/:/ }"
+    else
+        printf '%s\n' "$key"
+    fi
+}
+
+print_duplicates_map() {
+    local map_name=$1
+    local label=$2
+    local -n duplicate_map=$map_name
+    local key
+
+    for key in $(printf '%s\n' "${!duplicate_map[@]}" | sort); do
+        echo "Error: Duplicate $label '$(format_duplicate_key "$label" "$key")' found:"
+        while IFS= read -r path; do
+            [ -n "$path" ] && echo "  $path"
+        done <<< "${duplicate_map[$key]}"
+        echo ""
+    done
+}
+
+ensure_scan_has_no_duplicates() {
+    if [ ${#TOP_LEVEL_DUPLICATES[@]} -gt 0 ] || [ ${#SUBCOMMAND_DUPLICATES[@]} -gt 0 ]; then
+        print_duplicates_map TOP_LEVEL_DUPLICATES "command"
+        print_duplicates_map SUBCOMMAND_DUPLICATES "subcommand"
+        echo "Run '$(basename "$0") doctor' to inspect command tree issues."
+        exit 1
+    fi
+}
+
+show_basic_help() {
+    cat <<EOF2
+konbini - A flexible command-line tool manager
+
+USAGE:
+    $(basename "$0") [--custom-commands-dir <dir>] <command> [args...]
+    $(basename "$0") [--custom-commands-dir <dir>] <command> <subcommand> [args...]
+    $(basename "$0") -h|help
+    $(basename "$0") doctor
+
+DESCRIPTION:
+    konbini helps you organize built-in commands and user custom commands.
+
+    Built-in commands are stored as .sh or .js files in: commands/
+    Custom commands are loaded from: custom-commands/ in the project root by default
+    You can override the custom commands directory with: --custom-commands-dir <dir>
+    Subcommands are organized in directories like: <commands-dir>/<command>-commands/
+
+For more information, use '$(basename "$0") -h' to see all available commands.
+EOF2
+}
+
+show_help() {
+    scan_all_definitions
+    ensure_scan_has_no_duplicates
+
+    local has_commands=0
+    echo "Commands:"
+    echo ""
+
+    local cmd
+    for cmd in $(printf '%s\n' "${!COMMAND_PATHS[@]}" | sort); do
+        printf "  %s %s -- %s [%s]\n" "$(basename "$0")" "$cmd" "${DESCRIPTIONS[$cmd]}" "$(command_source_label "${COMMAND_SOURCES[$cmd]}")"
+        has_commands=1
+    done
+
+    if [ $has_commands -eq 0 ]; then
+        echo "  (No commands found)"
+    fi
+    echo ""
+
+    local has_groups=0
+    local group
+    for group in $(printf '%s\n' "${!SUBCOMMAND_GROUPS[@]}" | sort); do
+        [ -n "${COMMAND_PATHS[$group]}" ] && continue
+        if [ $has_groups -eq 0 ]; then
+            echo "Command Groups (with subcommands):"
+            echo ""
+            has_groups=1
+        fi
+        printf "  %s %s -- %s\n" "$(basename "$0")" "$group" "command group (use '$group -h' to see subcommands)"
+    done
+
+    if [ $has_groups -eq 1 ]; then
+        echo ""
+    fi
+
+    echo "Use '$(basename "$0") -h' to show this message"
+    echo "Use '$(basename "$0") <group> -h' to see subcommands for a group"
+}
+
+show_subcommand_basic_help() {
+    local parent_command=$1
+    cat <<EOF2
+konbini $parent_command - Subcommand group
+
+USAGE:
+    $(basename "$0") $parent_command <subcommand> [args...]
+    $(basename "$0") $parent_command -h|help
+
+EXAMPLES:
+    $(basename "$0") $parent_command -h          Show all available subcommands
+    $(basename "$0") $parent_command <name>      Execute a subcommand
+
+For more information, use '$(basename "$0") $parent_command -h' to see all available subcommands.
+EOF2
+}
+
+show_subcommand_help() {
+    local parent_command=$1
+
+    scan_all_definitions
+
+    local key
+    for key in "${!SUBCOMMAND_DUPLICATES[@]}"; do
+        case "$key" in
+            "$parent_command":*)
+                print_duplicates_map SUBCOMMAND_DUPLICATES "subcommand"
+                echo "Run '$(basename "$0") doctor' to inspect command tree issues."
+                exit 1
+                ;;
+        esac
+    done
+
+    echo "Supported subcommands for '$parent_command':"
+    echo ""
+
+    local found=0
+    local cmd
+    for cmd in $(printf '%s\n' "${!SUBCOMMAND_PATHS[@]}" | sed -n "s/^$parent_command://p" | sort); do
+        key="$parent_command:$cmd"
+        printf "  %s %s %s -- %s [%s]\n" "$(basename "$0")" "$parent_command" "$cmd" "${SUBCOMMAND_DESCRIPTIONS[$key]}" "$(command_source_label "${SUBCOMMAND_SOURCES[$key]}")"
+        found=1
+    done
+
+    if [ $found -eq 0 ]; then
+        echo "No subcommands found for '$parent_command'"
+        echo ""
+        echo "Looked in the following directories:"
+        local dir
+        for dir in "${COMMAND_DIRS[@]}"; do
+            echo "  ${dir}/${parent_command}-commands/"
+        done
+        echo ""
+        echo "To add subcommands, create .sh or .js files in one of those directories."
+        echo "  For .sh files, start with: # DESCRIPTION: your description here"
+        echo "  For .js files, start with: // DESCRIPTION: your description here"
+        return
+    fi
+
+    echo ""
+}
+
+export_runtime_env() {
+    export KONBINI_ROOT="$SCRIPT_DIR"
+    export KONBINI_LIB_DIR="$SCRIPT_DIR/lib"
+    export KONBINI_COMMANDS_DIR="$BUILTIN_COMMANDS_DIR"
+    export KONBINI_CUSTOM_COMMANDS_DIR="${CUSTOM_COMMANDS_DIR:+$CUSTOM_COMMANDS_DIR/commands}"
+    export KONBINI_CUSTOM_LIB_DIR="${CUSTOM_COMMANDS_DIR:+$CUSTOM_COMMANDS_DIR/lib}"
+}
+
+run_command_file() {
+    local cmd_file=$1
+    shift
+
+    export_runtime_env
+
+    if [ "$VERBOSE" = true ]; then
+        echo "Running: $cmd_file"
+    fi
+
+    if [[ "$cmd_file" = *.sh ]]; then
+        if [ ! -x "$cmd_file" ]; then
+            chmod +x "$cmd_file"
+        fi
+        BASH_ENV="$SCRIPT_DIR/lib/runtime.sh" bash "$cmd_file" "$@"
+    elif [[ "$cmd_file" = *.js ]]; then
+        node "$cmd_file" "$@"
+    fi
+}
+
+resolve_top_level_command() {
+    local command=$1
+    local -n out_candidates=$2
+
+    out_candidates=()
+
+    if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+        collect_top_level_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$command" out_candidates
+        if [ ${#out_candidates[@]} -gt 0 ]; then
+            return
+        fi
+    fi
+
+    collect_top_level_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$command" out_candidates
+}
+
+resolve_subcommand() {
+    local parent_command=$1
+    local subcommand=$2
+    local -n out_candidates=$3
+
+    out_candidates=()
+
+    if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+        collect_subcommand_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$parent_command" "$subcommand" out_candidates
+        if [ ${#out_candidates[@]} -gt 0 ]; then
+            return
+        fi
+    fi
+
+    collect_subcommand_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$parent_command" "$subcommand" out_candidates
+}
+
+fail_on_duplicate_candidates() {
+    local label=$1
+    local scope_label=$2
+    shift 2
+    local -a candidates=("$@")
+
+    if [ ${#candidates[@]} -le 1 ]; then
+        return
+    fi
+
+    echo "Error: Duplicate $label found in $scope_label:"
+    local path
+    for path in "${candidates[@]}"; do
+        echo "  $path"
+    done
+    echo ""
+    echo "Please keep only one matching file in $scope_label, or run '$(basename "$0") doctor' for a full check."
+    exit 1
+}
+
+execute_command() {
+    local command=$1
+    shift
+
+    local -a command_candidates=()
+    if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+        collect_top_level_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$command" command_candidates
+        fail_on_duplicate_candidates "command '$command'" "custom-commands" "${command_candidates[@]}"
+        if [ ${#command_candidates[@]} -eq 1 ]; then
+            run_command_file "${command_candidates[0]}" "$@"
+            return
+        fi
+    fi
+
+    collect_top_level_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$command" command_candidates
+    fail_on_duplicate_candidates "command '$command'" "commands" "${command_candidates[@]}"
+    if [ ${#command_candidates[@]} -eq 1 ]; then
+        run_command_file "${command_candidates[0]}" "$@"
+        return
+    fi
+
+    if group_exists "$command"; then
+        local -a selected_candidates=()
+
+        if [ $# -eq 0 ]; then
+            if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+                collect_subcommand_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$command" "$command" selected_candidates
+                fail_on_duplicate_candidates "subcommand '$command $command'" "custom-commands" "${selected_candidates[@]}"
+                if [ ${#selected_candidates[@]} -eq 1 ]; then
+                    run_command_file "${selected_candidates[0]}"
+                    return
+                fi
+            fi
+
+            collect_subcommand_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$command" "$command" selected_candidates
+            fail_on_duplicate_candidates "subcommand '$command $command'" "commands" "${selected_candidates[@]}"
+            if [ ${#selected_candidates[@]} -eq 1 ]; then
+                run_command_file "${selected_candidates[0]}"
+                return
+            fi
+
+            show_subcommand_basic_help "$command"
+            return
+        fi
+
+        if is_help_flag "$1"; then
+            show_subcommand_help "$command"
+            return
+        fi
+
+        if [[ "$1" =~ ^- ]]; then
+            if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+                collect_subcommand_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$command" "$command" selected_candidates
+                fail_on_duplicate_candidates "subcommand '$command $command'" "custom-commands" "${selected_candidates[@]}"
+                if [ ${#selected_candidates[@]} -eq 1 ]; then
+                    run_command_file "${selected_candidates[0]}" "$@"
+                    return
+                fi
+            fi
+
+            collect_subcommand_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$command" "$command" selected_candidates
+            fail_on_duplicate_candidates "subcommand '$command $command'" "commands" "${selected_candidates[@]}"
+            if [ ${#selected_candidates[@]} -eq 1 ]; then
+                run_command_file "${selected_candidates[0]}" "$@"
+                return
+            fi
+
+            show_subcommand_basic_help "$command"
+            return
+        fi
+
+        local subcommand=$1
+        shift
+
+        if [ -n "$CUSTOM_COMMANDS_COMMANDS_DIR" ]; then
+            collect_subcommand_candidates_in_dir "$CUSTOM_COMMANDS_COMMANDS_DIR" "$command" "$subcommand" selected_candidates
+            fail_on_duplicate_candidates "subcommand '$command $subcommand'" "custom-commands" "${selected_candidates[@]}"
+            if [ ${#selected_candidates[@]} -eq 1 ]; then
+                run_command_file "${selected_candidates[0]}" "$@"
+                return
+            fi
+        fi
+
+        collect_subcommand_candidates_in_dir "$BUILTIN_COMMANDS_DIR" "$command" "$subcommand" selected_candidates
+        fail_on_duplicate_candidates "subcommand '$command $subcommand'" "commands" "${selected_candidates[@]}"
+        if [ ${#selected_candidates[@]} -eq 1 ]; then
+            run_command_file "${selected_candidates[0]}" "$@"
+            return
+        fi
+
+        echo "Error: Unknown subcommand '$command $subcommand'"
+        echo ""
+        show_subcommand_help "$command"
+        exit 1
+    fi
+
+    echo "Error: Unknown command '$command'"
+    echo ""
+    echo "Use '$(basename "$0") -h' to see all available commands."
+    exit 1
+}
+
+run_doctor() {
+    scan_all_definitions
+
+    local errors=0
+    local warnings=0
+
+    echo "Konbini doctor"
+    echo ""
+
+    if [ ${#TOP_LEVEL_DUPLICATES[@]} -gt 0 ]; then
+        print_duplicates_map TOP_LEVEL_DUPLICATES "command"
+        errors=$((errors + ${#TOP_LEVEL_DUPLICATES[@]}))
+    fi
+
+    if [ ${#SUBCOMMAND_DUPLICATES[@]} -gt 0 ]; then
+        print_duplicates_map SUBCOMMAND_DUPLICATES "subcommand"
+        errors=$((errors + ${#SUBCOMMAND_DUPLICATES[@]}))
+    fi
+
+    local group
+    for group in $(printf '%s\n' "${!SUBCOMMAND_GROUPS[@]}" | sort); do
+        if [ -n "${COMMAND_PATHS[$group]}" ]; then
+            echo "Warning: Command group '$group' is shadowed by top-level command '${COMMAND_PATHS[$group]}'"
+            echo "  The group exists, but execution will use the top-level command first."
+            echo ""
+            warnings=$((warnings + 1))
+        fi
+    done
+
+    if [ $errors -eq 0 ] && [ $warnings -eq 0 ]; then
+        echo "OK: no duplicate commands, no duplicate subcommands, no shadowed command groups."
+        return 0
+    fi
+
+    echo "Summary: $errors error(s), $warnings warning(s)."
+    [ $errors -eq 0 ]
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --custom-commands-dir)
+                if [ $# -lt 2 ]; then
+                    echo "Error: --custom-commands-dir requires a directory path"
+                    exit 2
+                fi
+                CUSTOM_COMMANDS_DIR="$2"
+                shift 2
+                ;;
+            --custom-commands-dir=*)
+                CUSTOM_COMMANDS_DIR="${1#*=}"
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    POSITIONAL_ARGS=("$@")
+}
+
+complete_bash_words() {
+    local cword=$1
+    shift
+    local -a words=("$@")
+
+    # Extract --custom-commands-dir from typed words before scanning,
+    # so the correct directory is included in the definition scan.
+    local i
+    for ((i=1; i<${#words[@]}; i++)); do
+        case "${words[$i]}" in
+            --custom-commands-dir)
+                if ((i+1 < ${#words[@]})); then
+                    CUSTOM_COMMANDS_DIR="${words[$((i+1))]}"
+                fi
+                ;;
+            --custom-commands-dir=*)
+                CUSTOM_COMMANDS_DIR="${words[$i]#*=}"
+                ;;
+        esac
+    done
+
+    set_command_dirs
+    scan_all_definitions
+
+    # Find the first non-flag positional argument (the command), skipping global options
+    local cmd=""
+    local cmd_pos=-1
+    for ((i=1; i<${#words[@]}; i++)); do
+        local word="${words[$i]}"
+        case "$word" in
+            --custom-commands-dir)
+                i=$((i+1))
+                continue
+                ;;
+            --custom-commands-dir=*|-v|--verbose|--)
+                continue
+                ;;
+            -*)
+                continue
+                ;;
+            *)
+                cmd="$word"
+                cmd_pos=$i
+                break
+                ;;
+        esac
+    done
+
+    # Completing the command name (no command yet, or cursor is on the command word)
+    if [ -z "$cmd" ] || [ "$cword" -le "$cmd_pos" ]; then
+        local name
+        for name in "${!COMMAND_PATHS[@]}"; do
+            printf '%s\n' "$name"
+        done
+        for name in "${!SUBCOMMAND_GROUPS[@]}"; do
+            [ -z "${COMMAND_PATHS[$name]}" ] && printf '%s\n' "$name"
+        done
+        printf 'doctor\nhelp\n'
+        return
+    fi
+
+    # Command is known — complete its subcommands if it is a group
+    if group_exists "$cmd"; then
+        local key
+        for key in "${!SUBCOMMAND_PATHS[@]}"; do
+            case "$key" in
+                "$cmd":*)
+                    printf '%s\n' "${key#${cmd}:}"
+                    ;;
+            esac
+        done
+    fi
+}
+
+main() {
+    # parse_args first so that flags injected by wrapper scripts
+    # (e.g. --custom-commands-dir) are processed before we handle --complete-bash
+    parse_args "$@"
+    set -- "${POSITIONAL_ARGS[@]}"
+    set_command_dirs
+
+    # Hidden completion mode
+    if [ "${1-}" = "--complete-bash" ]; then
+        shift
+        local _cword=${1:-0}
+        shift
+        complete_bash_words "$_cword" "$@"
+        exit 0
+    fi
+
+    if [ $# -eq 0 ]; then
+        show_basic_help
+        exit 0
+    fi
+
+    if is_help_flag "$1"; then
+        show_help
+        exit 0
+    fi
+
+    if [ "$1" = "doctor" ]; then
+        run_doctor
+        exit $?
+    fi
+
+    execute_command "$@"
+}
+
+main "$@"

@@ -18,14 +18,14 @@ Create a wrapper script on your `PATH` so you can call `konbini` from anywhere a
 mkdir -p ~/.local/bin
 cat > ~/.local/bin/konbini << 'EOF'
 #!/usr/bin/env bash
-exec "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
+exec "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/custom-commands" "$@"
 EOF
 chmod +x ~/.local/bin/konbini
 ```
 
 `~/.local/bin` is automatically added to `PATH` by Ubuntu's default `~/.profile` when the directory exists. If it's not on your `PATH` yet, restart your shell or run `source ~/.profile`.
 
-This assumes your custom commands live at `~/projects/my-custom-commands` — adjust the path if yours is elsewhere. The directory does not need to exist yet.
+This assumes your custom commands live at `~/projects/custom-commands` — adjust the path if yours is elsewhere. The directory does not need to exist yet.
 
 The wrapper script is the recommended approach — it works in interactive terminals, shell scripts, and cron jobs, and tab completion works through it automatically.
 
@@ -36,14 +36,14 @@ The wrapper script is the recommended approach — it works in interactive termi
 
 ```bash
 konbini() {
-  "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/my-custom-commands" "$@"
+  "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/custom-commands" "$@"
 }
 ```
 
 **Alias** (not recommended) — bash does not trigger custom tab completion for aliases:
 
 ```bash
-alias konbini='~/.konbini/konbini --custom-commands-dir ~/projects/my-custom-commands'
+alias konbini='~/.konbini/konbini --custom-commands-dir ~/projects/custom-commands'
 ```
 
 Both only work in shells that have sourced `.bashrc`. Cron jobs and non-interactive scripts do not source `.bashrc` by default.
@@ -109,6 +109,121 @@ That's the core usage: drop scripts into a directory, run them through a single 
 - Checks for duplicate commands and structural issues with `konbini doctor`
 - Extracts command descriptions from `DESCRIPTION` comments in command files
 
+## Dependencies
+
+> Currently developed and tested on **Ubuntu / Debian** only.
+
+### Core framework
+
+`konbini` itself requires only:
+
+| Requirement | Notes |
+|---|---|
+| `bash` 4.0+ | Ubuntu 20.04+ ships with bash 5 — no action needed |
+| `node` / Node.js | Required only if you use `.js` command files |
+
+### Built-in commands
+
+Each built-in command has its own external dependencies. Install only what you use.
+
+| Command | Tool required |
+|---|---|
+| `claude` | `docker` + custom image `claudecode` |
+| `codex` | `docker` + custom image `codex` |
+| `node` | `docker` + `node:24` image |
+| `dcd` `dce` `dci` `dcl` `dcp` `dcr` `dcu` | `docker compose` (bundled with Docker Engine) |
+| `copy` | `xclip` |
+| `convertheic` | `heif-convert` (from `libheif-examples`) |
+| `down` | `aria2c` |
+| `pwgen` | `pwgen`, `shuf` (`shuf` is part of `coreutils`) |
+| `savekey` | `secret-tool` (from `libsecret-tools`) |
+| `install-calibre` | `tar`, `sudo` (pre-installed) |
+| `git pullrecursive` / `statusrecursive` | `git` |
+| `verse` | `node`, internet access; falls back to `diatheke` (optional) |
+
+### Optional library utilities (`lib/common.sh`)
+
+These degrade gracefully when absent — missing tools are silently skipped.
+
+| Tool | Function |
+|---|---|
+| `toilet` or `figlet` | `echoLargeText()` — large terminal text |
+| `notify-send` | `send_notification()` — desktop notifications |
+| `kitten` | Tab title/color control in [Kitty](https://sw.kovidgoyal.net/kitty/) terminal |
+
+## Installing system dependencies
+
+> **Ubuntu / Debian only.** See [macOS notes](#macos-notes) if you are on macOS.
+
+Install all apt-managed dependencies in one shot:
+
+```bash
+sudo apt install nodejs git xclip aria2 pwgen libsecret-tools libheif-examples
+```
+
+Optionally, for large text output and desktop notifications in `lib/common.sh`:
+
+```bash
+sudo apt install toilet libnotify-bin
+```
+
+### Docker
+
+Docker Engine is installed separately. Follow the official guide for your distro:
+[https://docs.docker.com/engine/install/](https://docs.docker.com/engine/install/)
+
+The `claude`, `codex`, and `node` commands also require their respective Docker images to be built or pulled before use.
+
+## macOS notes
+
+`konbini` works on macOS with a few adjustments.
+
+### Critical: upgrade bash
+
+macOS ships with bash 3.2 (due to licensing). `konbini` uses associative arrays (`declare -A`) which require bash 4+. Install a modern bash and use it as the interpreter:
+
+```bash
+brew install bash
+```
+
+Then make sure your wrapper script uses the Homebrew bash explicitly:
+
+```bash
+#!/opt/homebrew/bin/bash   # Apple Silicon
+# or
+#!/usr/local/bin/bash      # Intel Mac
+exec "$HOME/.konbini/konbini" --custom-commands-dir "$HOME/projects/custom-commands" "$@"
+```
+
+Or update `konbini`'s shebang line from `#!/usr/bin/env bash` to point at the Homebrew bash.
+
+### PATH setup
+
+Unlike Ubuntu, macOS does not automatically add `~/.local/bin` to `PATH`. Add it manually in `~/.zshrc` (or `~/.bash_profile`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Built-in commands that need adaptation on macOS
+
+| Command | Issue | Fix |
+|---|---|---|
+| `copy` | Uses `xclip`, not available on macOS | Replace `xclip -selection clipboard -i` with `pbcopy <` in a custom override |
+| `savekey` | Uses `secret-tool` (GNOME Keyring), not available on macOS | Replace with `security add-generic-password` / `security find-generic-password` in a custom override |
+| `pwgen` | Uses `shuf` (GNU coreutils), not available by default | `brew install coreutils` (provides `gshuf`), then adjust the script |
+
+### Tools available via Homebrew
+
+Most other dependencies install cleanly:
+
+```bash
+brew install aria2 pwgen figlet libheif node git
+brew install --cask docker
+```
+
+`notify-send` has no direct macOS equivalent, but `send_notification()` in `lib/common.sh` silently skips if `notify-send` is not found — no action needed.
+
 ## Directory structure
 
 This repository contains a few built-in examples. You can follow the same structure to add your own commands.
@@ -120,7 +235,7 @@ This repository contains a few built-in examples. You can follow the same struct
 The custom commands directory (specified via `--custom-commands-dir`) must follow this structure:
 
 ```
-my-custom-commands/
+custom-commands/
   commands/        ← your command files go here (.sh or .js)
     mycommand.sh
     git-commands/  ← subcommand groups go here too

@@ -92,25 +92,22 @@ requireSecretTool() {
 readApiKey() {
     requireSecretTool || return $?
     local service="$1"
-    local user="$2"
-    [ -n "$service" ] && [ -n "$user" ] || { echo "Usage: readApiKey <service> <user>" >&2; return 2; }
-    secret-tool lookup service "$service" user "$user" 2>/dev/null
+    [ -n "$service" ] || { echo "Usage: readApiKey <service>" >&2; return 2; }
+    secret-tool lookup service "$service" 2>/dev/null
 }
 
 writeApiKey() {
     requireSecretTool || return $?
     local service="$1"
-    local user="$2"
-    local provided_key="$3"
-    [ -n "$service" ] && [ -n "$user" ] || { echo "Usage: writeApiKey <service> <user> [key]" >&2; return 2; }
+    local provided_key="$2"
+    [ -n "$service" ] || { echo "Usage: writeApiKey <service> [key]" >&2; return 2; }
 
     local k1 k2
     if [ -n "$provided_key" ]; then
         k1="$provided_key"
         k2="$provided_key"
     else
-        echo "No API key stored for service='$service' user='$user'." >&2
-        echo "Please enter it now (input hidden). Press Ctrl+C to abort." >&2
+        echo "Enter API key for service='$service' (input hidden). Press Ctrl+C to abort." >&2
         read -r -s -p "API key: " k1; echo >&2
         read -r -s -p "Confirm : " k2; echo >&2
     fi
@@ -121,7 +118,7 @@ writeApiKey() {
         return 1
     fi
 
-    if ! printf %s "$k1" | secret-tool store --label="Personal API Key for $service ($user)" service "$service" user "$user" ; then
+    if ! printf %s "$k1" | secret-tool store --label="Personal API Key for $service" service "$service" ; then
         echo "Error: failed to store key via secret-tool." >&2
         unset k1 k2
         return 1
@@ -133,14 +130,13 @@ writeApiKey() {
 getApiKey() {
     # Backward-compatible behavior: read first, then prompt to save if missing, then read again
     local service="$1"
-    local user="$2"
-    [ -n "$service" ] && [ -n "$user" ] || { echo "Usage: getApiKey <service> <user>" >&2; return 2; }
+    [ -n "$service" ] || { echo "Usage: getApiKey <service>" >&2; return 2; }
 
     local key
-    key=$(readApiKey "$service" "$user")
+    key=$(readApiKey "$service")
     if [ -z "$key" ]; then
-        writeApiKey "$service" "$user" || return 1
-        key=$(readApiKey "$service" "$user")
+        writeApiKey "$service" || return 1
+        key=$(readApiKey "$service")
     fi
     [ -n "$key" ] || { echo "Error: failed to obtain API key." >&2; return 1; }
     echo "$key"

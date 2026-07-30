@@ -347,6 +347,28 @@ konbini <Tab>          # complete all available commands
 konbini git <Tab>      # complete subcommands under the git group
 ```
 
+File and directory completion also works after any command or subcommand when
+the current word starts with an explicit path prefix:
+
+```bash
+konbini mycommand ./REA<Tab>    # current directory
+konbini mycommand ../pro<Tab>   # parent directory
+konbini mycommand /tm<Tab>      # filesystem root
+konbini mycommand ~/Dow<Tab>    # current user's home directory
+```
+
+`mycommand` represents any built-in or custom command. Path completion is
+independent of the preceding command and also works in later argument
+positions. It preserves shell-native behavior for spaces, quoting, and the
+trailing `/` on directories.
+
+In Bash, pressing `<Tab>` after a bare `~` completes it to `~/`. Zsh keeps its
+native behavior for a bare `~` and offers user names instead; type `~/` to
+complete paths under the current user's home directory.
+
+Path completion only provides candidates. The selected command must still
+support the resulting path argument.
+
 The completion script invokes the command via `${COMP_WORDS[0]}` (whatever you typed at the prompt), so it automatically goes through your wrapper and includes commands from your custom directory — no extra configuration needed.
 
 ## doctor
